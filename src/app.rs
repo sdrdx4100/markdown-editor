@@ -1,3 +1,4 @@
+use crate::editor_actions::{self, EditorAction};
 use crate::note::Note;
 use crate::theme;
 use egui::{Color32, FontFamily, FontId, RichText, ScrollArea, TextEdit, Ui};
@@ -10,7 +11,10 @@ pub struct MarkdownApp {
     cache: CommonMarkCache,
     show_sidebar: bool,
     search_query: String,
+    pending_action: Option<EditorAction>,
 }
+
+const EDITOR_ID: &str = "main_editor";
 
 impl MarkdownApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
@@ -38,21 +42,101 @@ impl MarkdownApp {
             cache: CommonMarkCache::default(),
             show_sidebar: true,
             search_query: String::new(),
+            pending_action: None,
         }
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let input = ctx.input(|i| i.clone());
+        let (ctrl, shift, key_s, key_n, key_o, key_b, key_i, key_k, key_e, key_q, key_l, key_t) =
+            ctx.input(|i| {
+                (
+                    i.modifiers.ctrl,
+                    i.modifiers.shift,
+                    i.key_pressed(egui::Key::S),
+                    i.key_pressed(egui::Key::N),
+                    i.key_pressed(egui::Key::O),
+                    i.key_pressed(egui::Key::B),
+                    i.key_pressed(egui::Key::I),
+                    i.key_pressed(egui::Key::K),
+                    i.key_pressed(egui::Key::E),
+                    i.key_pressed(egui::Key::Q),
+                    i.key_pressed(egui::Key::L),
+                    i.key_pressed(egui::Key::T),
+                )
+            });
 
-        if input.key_pressed(egui::Key::S) && input.modifiers.ctrl {
+        if ctrl && key_s && !shift {
             self.save_current();
         }
-        if input.key_pressed(egui::Key::N) && input.modifiers.ctrl {
+        if ctrl && key_n && !shift {
             self.new_note();
         }
-        if input.key_pressed(egui::Key::O) && input.modifiers.ctrl {
+        if ctrl && key_o && !shift {
             self.open_file();
         }
+        // Formatting shortcuts
+        if ctrl && key_b && !shift {
+            self.pending_action = Some(EditorAction::Wrap { prefix: "**", suffix: "**" });
+        }
+        if ctrl && key_i && !shift {
+            self.pending_action = Some(EditorAction::Wrap { prefix: "*", suffix: "*" });
+        }
+        if ctrl && key_k && !shift {
+            self.pending_action = Some(EditorAction::Insert("[リンクテキスト](https://)"));
+        }
+        if ctrl && key_e && !shift {
+            self.pending_action = Some(EditorAction::Wrap { prefix: "`", suffix: "`" });
+        }
+        if ctrl && shift && key_q {
+            self.pending_action = Some(EditorAction::LinePrefix("> "));
+        }
+        if ctrl && shift && key_l {
+            self.pending_action = Some(EditorAction::LinePrefix("- "));
+        }
+        if ctrl && shift && key_t {
+            self.pending_action = Some(EditorAction::LinePrefix("- [ ] "));
+        }
+    }
+
+    fn toolbar_button(&mut self, ui: &mut Ui, label: &str, tooltip: &str, action: EditorAction) {
+        let resp = ui.add(
+            egui::Button::new(RichText::new(label).size(13.0))
+                .min_size(egui::vec2(28.0, 24.0))
+                .fill(Color32::from_rgb(40, 42, 50)),
+        );
+        if resp.on_hover_text(tooltip).clicked() {
+            self.pending_action = Some(action);
+        }
+    }
+
+    fn draw_toolbar(&mut self, ui: &mut Ui) {
+        egui::Frame::none()
+            .fill(Color32::from_rgb(32, 34, 40))
+            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    self.toolbar_button(ui, "B", "太字 (Ctrl+B)", EditorAction::Wrap { prefix: "**", suffix: "**" });
+                    self.toolbar_button(ui, "I", "斜体 (Ctrl+I)", EditorAction::Wrap { prefix: "*", suffix: "*" });
+                    self.toolbar_button(ui, "S", "打ち消し", EditorAction::Wrap { prefix: "~~", suffix: "~~" });
+                    ui.separator();
+                    self.toolbar_button(ui, "H1", "見出し1", EditorAction::LinePrefix("# "));
+                    self.toolbar_button(ui, "H2", "見出し2", EditorAction::LinePrefix("## "));
+                    self.toolbar_button(ui, "H3", "見出し3", EditorAction::LinePrefix("### "));
+                    ui.separator();
+                    self.toolbar_button(ui, "</>", "インラインコード (Ctrl+E)", EditorAction::Wrap { prefix: "`", suffix: "`" });
+                    self.toolbar_button(ui, "{ }", "コードブロック", EditorAction::CodeBlock(""));
+                    self.toolbar_button(ui, "🔗", "リンク (Ctrl+K)", EditorAction::Insert("[リンクテキスト](https://)"));
+                    self.toolbar_button(ui, "🖼", "画像", EditorAction::Insert("![alt](path/to/image.png)"));
+                    ui.separator();
+                    self.toolbar_button(ui, "•", "箇条書き (Ctrl+Shift+L)", EditorAction::LinePrefix("- "));
+                    self.toolbar_button(ui, "1.", "番号付きリスト", EditorAction::LinePrefix("1. "));
+                    self.toolbar_button(ui, "☑", "ToDo (Ctrl+Shift+T)", EditorAction::LinePrefix("- [ ] "));
+                    self.toolbar_button(ui, "❝", "引用 (Ctrl+Shift+Q)", EditorAction::LinePrefix("> "));
+                    self.toolbar_button(ui, "—", "水平線", EditorAction::Insert("\n---\n"));
+                    self.toolbar_button(ui, "⊞", "テーブル", EditorAction::Table { rows: 2, cols: 3 });
+                });
+            });
     }
 
     fn save_current(&mut self) {
@@ -240,83 +324,96 @@ impl MarkdownApp {
     }
 
     fn draw_editor(&mut self, ui: &mut Ui) {
-        let note = &mut self.notes[self.selected];
+        // Header
+        let path_label = self.notes[self.selected]
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "[未保存]".to_string());
 
         egui::Frame::none()
-            .fill(theme::EDITOR_BG)
-            .inner_margin(egui::Margin::symmetric(0.0, 0.0))
+            .fill(Color32::from_rgb(26, 28, 34))
+            .inner_margin(egui::Margin::symmetric(12.0, 6.0))
             .show(ui, |ui| {
-                // Toolbar
-                egui::Frame::none()
-                    .fill(Color32::from_rgb(26, 28, 34))
-                    .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("✏  Editor")
-                                    .color(theme::TEXT_DIM)
-                                    .size(12.0),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let path_label = note
-                                        .path
-                                        .as_ref()
-                                        .and_then(|p| p.file_name())
-                                        .and_then(|n| n.to_str())
-                                        .unwrap_or("[未保存]");
-                                    ui.label(
-                                        RichText::new(path_label)
-                                            .color(theme::TEXT_DIM)
-                                            .size(11.0),
-                                    );
-                                },
-                            );
-                        });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("✏  Editor").color(theme::TEXT_DIM).size(12.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(path_label).color(theme::TEXT_DIM).size(11.0));
                     });
+                });
+            });
 
-                ui.add(egui::Separator::default().spacing(0.0).grow(0.0));
+        // Markdown formatting toolbar
+        self.draw_toolbar(ui);
 
-                // Editor area with line numbers
-                ScrollArea::both()
-                    .id_salt("editor_scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.horizontal_top(|ui| {
-                            // Line numbers
-                            let line_count = note.content.lines().count().max(1);
-                            let line_nums: String = (1..=line_count)
-                                .map(|n| format!("{}\n", n))
-                                .collect();
-                            ui.add(
-                                TextEdit::multiline(&mut line_nums.as_str())
-                                    .desired_width(36.0)
-                                    .frame(false)
-                                    .interactive(false)
-                                    .font(FontId::new(13.0, FontFamily::Monospace))
-                                    .text_color(theme::LINE_NUMBER_COLOR),
-                            );
+        ui.add(egui::Separator::default().spacing(0.0).grow(0.0));
 
-                            ui.add(egui::Separator::default().vertical().spacing(0.0).grow(0.0));
+        // Editor area with line numbers
+        ScrollArea::both()
+            .id_salt("editor_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    // Line numbers
+                    let note = &self.notes[self.selected];
+                    let line_count = note.content.lines().count().max(1);
+                    let line_nums: String = (1..=line_count).map(|n| format!("{}\n", n)).collect();
+                    ui.add(
+                        TextEdit::multiline(&mut line_nums.as_str())
+                            .desired_width(36.0)
+                            .frame(false)
+                            .interactive(false)
+                            .font(FontId::new(13.0, FontFamily::Monospace))
+                            .text_color(theme::LINE_NUMBER_COLOR),
+                    );
 
-                            // Text editor
-                            let prev_content = note.content.clone();
-                            let editor = TextEdit::multiline(&mut note.content)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(40)
-                                .frame(false)
-                                .font(FontId::new(13.0, FontFamily::Monospace))
-                                .text_color(theme::TEXT_NORMAL)
-                                .lock_focus(true);
+                    ui.add(egui::Separator::default().vertical().spacing(0.0).grow(0.0));
 
-                            ui.add(editor);
+                    // Text editor
+                    let note = &mut self.notes[self.selected];
+                    let prev_content = note.content.clone();
+                    let editor_id = egui::Id::new(EDITOR_ID);
+                    let output = TextEdit::multiline(&mut note.content)
+                        .id(editor_id)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(40)
+                        .frame(false)
+                        .font(FontId::new(13.0, FontFamily::Monospace))
+                        .text_color(theme::TEXT_NORMAL)
+                        .lock_focus(true)
+                        .show(ui);
 
-                            if note.content != prev_content {
-                                note.modified = true;
-                            }
-                        });
-                    });
+                    if note.content != prev_content {
+                        note.modified = true;
+                    }
+
+                    // Apply pending markdown action (from toolbar or shortcut)
+                    if let Some(action) = self.pending_action.take() {
+                        let (sel_start, sel_end) =
+                            if let Some(range) = output.cursor_range {
+                                (range.primary.ccursor.index, range.secondary.ccursor.index)
+                            } else {
+                                let end = note.content.chars().count();
+                                (end, end)
+                            };
+
+                        let result = editor_actions::apply(action, &note.content, sel_start, sel_end);
+                        note.content = result.new_content;
+                        note.modified = true;
+
+                        // Restore cursor to where the action placed it
+                        let mut state = output.state.clone();
+                        let new_range = egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(result.new_cursor_start),
+                            egui::text::CCursor::new(result.new_cursor_end),
+                        );
+                        state.cursor.set_char_range(Some(new_range));
+                        state.store(ui.ctx(), editor_id);
+                        ui.ctx().memory_mut(|m| m.request_focus(editor_id));
+                    }
+                });
             });
     }
 
