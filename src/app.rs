@@ -1,3 +1,4 @@
+use crate::attachments;
 use crate::editor_actions::{self, EditorAction};
 use crate::export;
 use crate::find_replace::{self, FindReplaceState};
@@ -170,6 +171,18 @@ impl MarkdownApp {
         }
         if alt && key_down {
             self.pending_line_move = Some(false);
+        }
+        // Ctrl+V: try image paste (text paste is handled by TextEdit natively)
+        let key_v = ctx.input(|i| i.key_pressed(egui::Key::V));
+        if ctrl && key_v && !shift {
+            if let Some(path) = attachments::paste_clipboard_image() {
+                let md = attachments::markdown_link_for(&path);
+                // We need to use a static string for EditorAction::Insert. Stash
+                // the rendered link via Box::leak — it's at most one small leak per
+                // paste, acceptable for a session-long-lived editor.
+                let leaked: &'static str = Box::leak(md.into_boxed_str());
+                self.pending_action = Some(EditorAction::Insert(leaked));
+            }
         }
         // Ctrl+P: Quick switcher
         let key_p = ctx.input(|i| i.key_pressed(egui::Key::P));

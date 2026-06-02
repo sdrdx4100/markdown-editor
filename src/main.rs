@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod attachments;
 mod editor_actions;
 mod export;
 mod find_replace;
