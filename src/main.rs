@@ -3,6 +3,8 @@
 mod app;
 mod editor_actions;
 mod note;
+mod settings;
+mod storage;
 mod theme;
 
 use app::MarkdownApp;
