@@ -30,6 +30,10 @@ pub struct Settings {
     pub show_preview: bool,
     #[serde(default = "default_true")]
     pub syntax_highlight: bool,
+    #[serde(default)]
+    pub show_toc: bool,
+    #[serde(default = "default_true")]
+    pub sync_scroll: bool,
 }
 
 fn default_font_size() -> f32 {
@@ -51,6 +55,8 @@ impl Default for Settings {
             show_sidebar: true,
             show_preview: true,
             syntax_highlight: true,
+            show_toc: false,
+            sync_scroll: true,
         }
     }
 }

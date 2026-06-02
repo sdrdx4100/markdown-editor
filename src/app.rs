@@ -1,10 +1,12 @@
 use crate::editor_actions::{self, EditorAction};
+use crate::export;
 use crate::find_replace::{self, FindReplaceState};
 use crate::highlight;
 use crate::note::Note;
 use crate::settings::{Settings, ThemeMode};
 use crate::storage;
 use crate::theme::{self, ThemeColors};
+use crate::toc;
 use egui::{Color32, FontFamily, FontId, RichText, ScrollArea, TextEdit, Ui};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use std::fs;
@@ -570,10 +572,46 @@ impl MarkdownApp {
             .inner_margin(egui::Margin::symmetric(12.0, 6.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("✏  Editor").color(c.text_dim).size(12.0));
+                    // Title editor (single-line)
+                    let note = &mut self.notes[self.selected];
+                    let title_resp = ui.add(
+                        TextEdit::singleline(&mut note.title)
+                            .desired_width(220.0)
+                            .frame(false)
+                            .font(FontId::new(14.0, FontFamily::Proportional))
+                            .text_color(c.text_strong),
+                    );
+                    if title_resp.changed() {
+                        note.modified = true;
+                        note.touch();
+                        self.notes_dirty = true;
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new(path_label).color(c.text_dim).size(11.0));
                     });
+                });
+
+                // Tag editing row
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🏷").color(c.text_dim).size(11.0));
+                    let note = &mut self.notes[self.selected];
+                    let mut tags_joined = note.tags.join(", ");
+                    let resp = ui.add(
+                        TextEdit::singleline(&mut tags_joined)
+                            .hint_text("タグをカンマ区切りで追加...")
+                            .desired_width(f32::INFINITY)
+                            .font(FontId::new(11.0, FontFamily::Proportional))
+                            .text_color(c.text_dim),
+                    );
+                    if resp.changed() {
+                        note.tags = tags_joined
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        note.touch();
+                        self.notes_dirty = true;
+                    }
                 });
             });
 
@@ -1075,6 +1113,75 @@ impl MarkdownApp {
         }
     }
 
+    fn export_html(&self) {
+        let note = &self.notes[self.selected];
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("HTML", &["html", "htm"])
+            .set_file_name(format!("{}.html", note.title))
+            .save_file()
+        else {
+            return;
+        };
+        let html = export::markdown_to_html(&note.content, &note.title);
+        let _ = std::fs::write(path, html);
+    }
+
+    fn draw_toc(&mut self, ui: &mut Ui) {
+        let c = self.colors();
+        egui::Frame::none()
+            .fill(c.header_bg)
+            .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+            .show(ui, |ui| {
+                ui.label(RichText::new("📑  目次").color(c.text_dim).size(12.0));
+            });
+        ui.add(egui::Separator::default().spacing(0.0).grow(0.0));
+
+        let content = self.notes[self.selected].content.clone();
+        let headings = toc::extract(&content);
+
+        ScrollArea::vertical()
+            .id_salt("toc_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                if headings.is_empty() {
+                    ui.label(
+                        RichText::new("  見出しがありません")
+                            .color(c.text_dim)
+                            .size(11.0)
+                            .italics(),
+                    );
+                    return;
+                }
+                let mut jump_to: Option<usize> = None;
+                for h in &headings {
+                    let indent = (h.level.saturating_sub(1) as f32) * 12.0;
+                    let resp = ui.horizontal(|ui| {
+                        ui.add_space(8.0 + indent);
+                        let color = if h.level == 1 { c.text_strong } else { c.text_normal };
+                        ui.add(egui::Label::new(
+                            RichText::new(&h.text).size(12.0).color(color),
+                        ).sense(egui::Sense::click()))
+                    });
+                    if resp.inner.clicked() {
+                        jump_to = Some(h.char_offset);
+                    }
+                }
+                if let Some(offset) = jump_to {
+                    let editor_id = egui::Id::new(EDITOR_ID);
+                    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), editor_id) {
+                        let range = egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(offset),
+                            egui::text::CCursor::new(offset),
+                        );
+                        state.cursor.set_char_range(Some(range));
+                        state.store(ui.ctx(), editor_id);
+                    }
+                    ui.ctx().memory_mut(|m| m.request_focus(editor_id));
+                }
+            });
+    }
+
     fn auto_save_if_needed(&mut self) {
         if self.settings.auto_save
             && self.notes_dirty
@@ -1220,6 +1327,11 @@ impl eframe::App for MarkdownApp {
                             ui.close_menu();
                         }
                         ui.separator();
+                        if ui.button("HTMLにエクスポート...").clicked() {
+                            self.export_html();
+                            ui.close_menu();
+                        }
+                        ui.separator();
                         if ui.button("終了").clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
@@ -1227,8 +1339,10 @@ impl eframe::App for MarkdownApp {
                     ui.menu_button("表示", |ui| {
                         ui.checkbox(&mut self.settings.show_sidebar, "サイドバー");
                         ui.checkbox(&mut self.settings.show_preview, "プレビュー");
+                        ui.checkbox(&mut self.settings.show_toc, "目次 (TOC)");
                         ui.checkbox(&mut self.settings.show_line_numbers, "行番号");
                         ui.checkbox(&mut self.settings.word_wrap, "折り返し");
+                        ui.checkbox(&mut self.settings.sync_scroll, "同期スクロール");
                     });
                     ui.menu_button("編集", |ui| {
                         if ui.button("検索...  Ctrl+F").clicked() {
@@ -1293,6 +1407,18 @@ impl eframe::App for MarkdownApp {
                 .frame(egui::Frame::none().fill(c.sidebar_bg))
                 .show(ctx, |ui| {
                     self.draw_sidebar(ui);
+                });
+        }
+
+        // TOC panel (right side, before central)
+        if self.settings.show_toc {
+            egui::SidePanel::right("toc")
+                .resizable(true)
+                .min_width(160.0)
+                .default_width(220.0)
+                .frame(egui::Frame::none().fill(c.sidebar_bg))
+                .show(ctx, |ui| {
+                    self.draw_toc(ui);
                 });
         }
 
