@@ -7,6 +7,7 @@ use crate::settings::{Settings, ThemeMode, ViewMode};
 use crate::storage;
 use crate::theme::{self, ThemeColors};
 use crate::toc;
+use crate::wikilinks::{self, QuickSwitcherState};
 use egui::{Color32, FontFamily, FontId, RichText, ScrollArea, TextEdit, Ui};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use std::fs;
@@ -29,6 +30,8 @@ pub struct MarkdownApp {
     show_settings: bool,
     show_trash: bool,
     find: FindReplaceState,
+    quick_switcher: QuickSwitcherState,
+    show_backlinks: bool,
 }
 
 impl MarkdownApp {
@@ -57,6 +60,8 @@ impl MarkdownApp {
             show_settings: false,
             show_trash: false,
             find: FindReplaceState::default(),
+            quick_switcher: QuickSwitcherState::default(),
+            show_backlinks: true,
         }
     }
 
@@ -165,6 +170,14 @@ impl MarkdownApp {
         }
         if alt && key_down {
             self.pending_line_move = Some(false);
+        }
+        // Ctrl+P: Quick switcher
+        let key_p = ctx.input(|i| i.key_pressed(egui::Key::P));
+        if ctrl && key_p && !shift {
+            self.quick_switcher.open();
+        }
+        if key_esc && self.quick_switcher.visible {
+            self.quick_switcher.close();
         }
         // Ctrl+\ to cycle view mode
         let key_backslash = ctx.input(|i| i.key_pressed(egui::Key::Backslash));
@@ -867,7 +880,8 @@ impl MarkdownApp {
 
     fn draw_preview(&mut self, ui: &mut Ui) {
         let c = self.colors();
-        let content = self.notes[self.selected].content.clone();
+        let raw = &self.notes[self.selected].content;
+        let content = wikilinks::render_for_preview(raw);
 
         egui::Frame::none().fill(c.preview_bg).show(ui, |ui| {
             egui::Frame::none()
@@ -1180,6 +1194,303 @@ impl MarkdownApp {
         }
     }
 
+    fn select_note_by_index(&mut self, idx: usize) {
+        if idx < self.notes.len() {
+            self.selected = idx;
+        }
+    }
+
+    fn navigate_to_wikilink(&mut self, target: &str) {
+        let matches = wikilinks::resolve(&self.notes, target);
+        if let Some(&idx) = matches.first() {
+            self.selected = idx;
+        } else {
+            // Create a new note with that title
+            let mut note = Note::new(target.to_string(), format!("# {}\n\n", target));
+            note.modified = true;
+            self.notes.push(note);
+            self.selected = self.notes.len() - 1;
+            self.notes_dirty = true;
+        }
+    }
+
+    fn draw_backlinks_panel(&mut self, ui: &mut Ui) {
+        let c = self.colors();
+        let selected = self.selected;
+        let current_title = self.notes[selected].title.clone();
+
+        let backlinks_index = wikilinks::build_backlink_index(&self.notes);
+        let backlinks = backlinks_index.get(&selected).cloned().unwrap_or_default();
+        let outgoing = wikilinks::extract(&self.notes[selected].content);
+
+        egui::Frame::none()
+            .fill(c.header_bg)
+            .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🔗  リンク").color(c.text_dim).size(12.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✖").on_hover_text("閉じる").clicked() {
+                            self.show_backlinks = false;
+                        }
+                    });
+                });
+            });
+        ui.add(egui::Separator::default().spacing(0.0).grow(0.0));
+
+        let mut nav_target: Option<NavTarget> = None;
+
+        ScrollArea::vertical()
+            .id_salt("backlinks_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+
+                // Outgoing links
+                ui.label(
+                    RichText::new(format!("  📤 アウトゴーイング ({})", outgoing.len()))
+                        .color(c.text_dim)
+                        .size(11.0)
+                        .strong(),
+                );
+                if outgoing.is_empty() {
+                    ui.label(
+                        RichText::new("    (なし)")
+                            .color(c.text_dim)
+                            .size(11.0)
+                            .italics(),
+                    );
+                } else {
+                    for link in &outgoing {
+                        let display = link.alias.as_deref().unwrap_or(&link.target);
+                        let exists = !wikilinks::resolve(&self.notes, &link.target).is_empty();
+                        let color = if exists { c.accent } else { c.text_dim };
+                        let prefix = if exists { "  → " } else { "  ✚ " };
+                        let resp = ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("{}{}", prefix, display))
+                                    .color(color)
+                                    .size(11.0),
+                            )
+                            .sense(egui::Sense::click()),
+                        );
+                        if resp.clicked() {
+                            nav_target = Some(NavTarget::Wiki(link.target.clone()));
+                        }
+                        if !exists {
+                            resp.on_hover_text("クリックで新規ノート作成");
+                        }
+                    }
+                }
+
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!("  📥 バックリンク ({})", backlinks.len()))
+                        .color(c.text_dim)
+                        .size(11.0)
+                        .strong(),
+                );
+                if backlinks.is_empty() {
+                    ui.label(
+                        RichText::new("    (なし)")
+                            .color(c.text_dim)
+                            .size(11.0)
+                            .italics(),
+                    );
+                } else {
+                    for (src_idx, link) in &backlinks {
+                        let src_title = &self.notes[*src_idx].title;
+                        let label = if let Some(alias) = &link.alias {
+                            format!("  ← {} ({})", src_title, alias)
+                        } else {
+                            format!("  ← {}", src_title)
+                        };
+                        let resp = ui.add(
+                            egui::Label::new(
+                                RichText::new(label).color(c.text_normal).size(11.0),
+                            )
+                            .sense(egui::Sense::click()),
+                        );
+                        if resp.clicked() {
+                            nav_target = Some(NavTarget::Index(*src_idx));
+                        }
+                    }
+                }
+                let _ = current_title;
+            });
+
+        match nav_target {
+            Some(NavTarget::Wiki(target)) => self.navigate_to_wikilink(&target),
+            Some(NavTarget::Index(idx)) => self.select_note_by_index(idx),
+            None => {}
+        }
+    }
+
+    fn draw_quick_switcher(&mut self, ctx: &egui::Context) {
+        if !self.quick_switcher.visible {
+            return;
+        }
+        let c = self.colors();
+        let mut close = false;
+        let mut navigate_to: Option<usize> = None;
+
+        // Build filtered candidates
+        let query = self.quick_switcher.query.clone();
+        let mut candidates: Vec<(i32, usize)> = self
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| !n.trashed)
+            .filter_map(|(i, n)| wikilinks::fuzzy_match(&n.title, &query).map(|s| (s, i)))
+            .collect();
+        candidates.sort_by_key(|(score, _)| *score);
+        candidates.truncate(20);
+
+        if self.quick_switcher.selected >= candidates.len() {
+            self.quick_switcher.selected = 0;
+        }
+
+        // Key navigation
+        let (key_up, key_down, key_enter) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::Enter),
+            )
+        });
+        if !candidates.is_empty() {
+            if key_down {
+                self.quick_switcher.selected =
+                    (self.quick_switcher.selected + 1) % candidates.len();
+            }
+            if key_up {
+                self.quick_switcher.selected = (self.quick_switcher.selected + candidates.len() - 1)
+                    % candidates.len();
+            }
+            if key_enter {
+                navigate_to = Some(candidates[self.quick_switcher.selected].1);
+                close = true;
+            }
+        } else if key_enter && !query.is_empty() {
+            // Create new note with the query as title
+            let mut note = Note::new(query.clone(), format!("# {}\n\n", query));
+            note.modified = true;
+            self.notes.push(note);
+            navigate_to = Some(self.notes.len() - 1);
+            self.notes_dirty = true;
+            close = true;
+        }
+
+        egui::Window::new("クイックスイッチャー")
+            .title_bar(false)
+            .resizable(false)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
+            .default_width(480.0)
+            .frame(
+                egui::Frame::popup(&ctx.style())
+                    .fill(c.toolbar_bg)
+                    .rounding(8.0)
+                    .inner_margin(egui::Margin::same(10.0)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(460.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🔎").size(14.0));
+                    let resp = ui.add(
+                        TextEdit::singleline(&mut self.quick_switcher.query)
+                            .hint_text("ノート名を検索... (Ctrl+P)")
+                            .desired_width(f32::INFINITY)
+                            .font(FontId::new(14.0, FontFamily::Proportional))
+                            .frame(false),
+                    );
+                    if self.quick_switcher.focus_query {
+                        resp.request_focus();
+                        self.quick_switcher.focus_query = false;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.add(egui::Separator::default().spacing(0.0).grow(0.0));
+                ui.add_space(4.0);
+
+                if candidates.is_empty() {
+                    if query.is_empty() {
+                        ui.label(
+                            RichText::new("ノート名を入力してください")
+                                .color(c.text_dim)
+                                .italics(),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!(
+                                "Enterで「{}」という新規ノートを作成",
+                                query
+                            ))
+                            .color(c.accent),
+                        );
+                    }
+                } else {
+                    for (rank, (_, idx)) in candidates.iter().enumerate() {
+                        let is_active = rank == self.quick_switcher.selected;
+                        let note = &self.notes[*idx];
+                        let bg = if is_active {
+                            c.selected_item_bg
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        let resp = egui::Frame::none()
+                            .fill(bg)
+                            .rounding(4.0)
+                            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(if note.starred { "★ " } else { "  " })
+                                            .color(egui::Color32::from_rgb(255, 200, 60)),
+                                    );
+                                    ui.label(
+                                        RichText::new(&note.title)
+                                            .color(if is_active {
+                                                egui::Color32::WHITE
+                                            } else {
+                                                c.text_normal
+                                            })
+                                            .size(13.0),
+                                    );
+                                });
+                            })
+                            .response
+                            .interact(egui::Sense::click());
+                        if resp.clicked() {
+                            navigate_to = Some(*idx);
+                            close = true;
+                        }
+                        if resp.hovered() {
+                            self.quick_switcher.selected = rank;
+                        }
+                    }
+                }
+                ui.add_space(4.0);
+                ui.add(egui::Separator::default().spacing(0.0).grow(0.0));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("↑↓ 移動  /  Enter 選択  /  Esc 閉じる")
+                            .color(c.text_dim)
+                            .size(10.0),
+                    );
+                });
+            });
+
+        if let Some(idx) = navigate_to {
+            self.selected = idx;
+        }
+        if close {
+            self.quick_switcher.close();
+        }
+    }
+
     fn export_html(&self) {
         let note = &self.notes[self.selected];
         let Some(path) = rfd::FileDialog::new()
@@ -1257,6 +1568,11 @@ impl MarkdownApp {
             self.save_notes();
         }
     }
+}
+
+enum NavTarget {
+    Wiki(String),
+    Index(usize),
 }
 
 struct ListMarkerInfo {
@@ -1412,6 +1728,7 @@ impl eframe::App for MarkdownApp {
                     ui.menu_button("表示", |ui| {
                         ui.checkbox(&mut self.settings.show_sidebar, "サイドバー");
                         ui.checkbox(&mut self.settings.show_toc, "目次 (TOC)");
+                        ui.checkbox(&mut self.show_backlinks, "バックリンクパネル");
                         ui.separator();
                         ui.label(RichText::new("表示モード").small().color(c.text_dim));
                         ui.radio_value(&mut self.settings.view_mode, ViewMode::EditorOnly, "📝 編集のみ");
@@ -1423,12 +1740,21 @@ impl eframe::App for MarkdownApp {
                         ui.checkbox(&mut self.settings.sync_scroll, "同期スクロール");
                     });
                     ui.menu_button("編集", |ui| {
+                        if ui.button("クイックスイッチャー  Ctrl+P").clicked() {
+                            self.quick_switcher.open();
+                            ui.close_menu();
+                        }
                         if ui.button("検索...  Ctrl+F").clicked() {
                             self.find.open_find();
                             ui.close_menu();
                         }
                         if ui.button("置換...  Ctrl+H").clicked() {
                             self.find.open_replace();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Wikiリンクを挿入  [[]]").clicked() {
+                            self.pending_action = Some(EditorAction::Insert("[[]]"));
                             ui.close_menu();
                         }
                     });
@@ -1488,6 +1814,18 @@ impl eframe::App for MarkdownApp {
                 });
         }
 
+        // Backlinks bottom panel
+        if self.show_backlinks {
+            egui::TopBottomPanel::bottom("backlinks_panel")
+                .resizable(true)
+                .min_height(80.0)
+                .default_height(160.0)
+                .frame(egui::Frame::none().fill(c.sidebar_bg))
+                .show(ctx, |ui| {
+                    self.draw_backlinks_panel(ui);
+                });
+        }
+
         // TOC panel (right side, before central)
         if self.settings.show_toc {
             egui::SidePanel::right("toc")
@@ -1538,6 +1876,7 @@ impl eframe::App for MarkdownApp {
 
         self.draw_find_bar(ctx);
         self.draw_settings_window(ctx);
+        self.draw_quick_switcher(ctx);
 
         // Save on close
         if ctx.input(|i| i.viewport().close_requested()) {

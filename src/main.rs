@@ -10,6 +10,7 @@ mod settings;
 mod storage;
 mod theme;
 mod toc;
+mod wikilinks;
 
 use app::MarkdownApp;
 
