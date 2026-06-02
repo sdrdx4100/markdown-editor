@@ -1980,7 +1980,6 @@ dependencies = [
  "serde",
  "serde_json",
  "syntect",
- "winapi",
 ]
 
 [[package]]

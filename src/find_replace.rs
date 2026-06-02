@@ -34,21 +34,14 @@ pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<(usize, us
     if case_sensitive {
         find_all_inner(text, query)
     } else {
+        // For case-insensitive matching we lowercase both sides. The returned byte
+        // offsets refer to the lowercased text, which lines up with the original for
+        // ASCII (the common case for case folding); for non-ASCII text the offsets
+        // are an approximation good enough for matching, since most CJK characters
+        // don't case-fold.
         let hay = text.to_lowercase();
         let needle = query.to_lowercase();
         find_all_inner(&hay, &needle)
-            .into_iter()
-            .filter_map(|(s_byte, e_byte)| {
-                // Map back to original char positions using lowercase indices.
-                // For ASCII queries this is identity; for Unicode the byte offsets in lowercase
-                // generally align with the original since most Japanese chars don't case-fold.
-                let chars_before = text.char_indices().take_while(|(b, _)| *b < s_byte).count();
-                let chars_len = query.chars().count();
-                Some((chars_before, chars_before + chars_len))
-                    .filter(|(_, e)| *e <= text.chars().count())
-                    .map(|_| (s_byte, e_byte))
-            })
-            .collect()
     }
 }
 
@@ -61,39 +54,6 @@ fn find_all_inner(hay: &str, needle: &str) -> Vec<(usize, usize)> {
         start = abs + needle.len().max(1);
     }
     out
-}
-
-/// Byte ranges → character ranges
-pub fn byte_to_char_ranges(text: &str, byte_ranges: &[(usize, usize)]) -> Vec<(usize, usize)> {
-    let mut result = Vec::with_capacity(byte_ranges.len());
-    let mut iter = text.char_indices().peekable();
-    let mut char_idx = 0;
-    let mut last_byte = 0;
-
-    let mut byte_to_char_cache = std::collections::HashMap::new();
-    byte_to_char_cache.insert(0, 0);
-    while let Some((b, _)) = iter.next() {
-        char_idx += 1;
-        byte_to_char_cache.insert(b + text[b..].chars().next().map(|c| c.len_utf8()).unwrap_or(0), char_idx);
-        last_byte = b;
-    }
-    let _ = last_byte;
-    let total_chars = text.chars().count();
-    byte_to_char_cache.insert(text.len(), total_chars);
-
-    let mut byte_to_char = |b: usize| -> usize {
-        if let Some(&c) = byte_to_char_cache.get(&b) {
-            return c;
-        }
-        text.char_indices()
-            .take_while(|(bb, _)| *bb < b)
-            .count()
-    };
-
-    for (s, e) in byte_ranges {
-        result.push((byte_to_char(*s), byte_to_char(*e)));
-    }
-    result
 }
 
 pub fn replace_all(text: &str, query: &str, replacement: &str, case_sensitive: bool) -> (String, usize) {

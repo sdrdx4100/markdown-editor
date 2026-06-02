@@ -20,7 +20,3 @@ syntect = { version = "5.2", default-features = false, features = ["default-fanc
 [profile.release]
 opt-level = 3
 lto = true
-
-# Windows: hide console window in release
-[target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["winuser"] }
