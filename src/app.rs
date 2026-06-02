@@ -395,6 +395,40 @@ impl eframe::App for MarkdownApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_shortcuts(ctx);
 
+        // Menu bar must be first so it reserves space before other panels
+        egui::TopBottomPanel::top("menu_bar")
+            .frame(egui::Frame::none().fill(Color32::from_rgb(20, 22, 26)))
+            .show(ctx, |ui| {
+                egui::menu::bar(ui, |ui| {
+                    ui.menu_button("ファイル", |ui| {
+                        if ui.button("新規ノート  Ctrl+N").clicked() {
+                            self.new_note();
+                            ui.close_menu();
+                        }
+                        if ui.button("開く...  Ctrl+O").clicked() {
+                            self.open_file();
+                            ui.close_menu();
+                        }
+                        if ui.button("保存...  Ctrl+S").clicked() {
+                            self.save_current();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("終了").clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    });
+                    ui.menu_button("表示", |ui| {
+                        if ui
+                            .checkbox(&mut self.show_sidebar, "サイドバーを表示")
+                            .clicked()
+                        {
+                            ui.close_menu();
+                        }
+                    });
+                });
+            });
+
         // Sidebar
         if self.show_sidebar {
             egui::SidePanel::left("sidebar")
@@ -430,38 +464,5 @@ impl eframe::App for MarkdownApp {
                 });
             });
 
-        // Top menu bar
-        egui::TopBottomPanel::top("menu_bar")
-            .frame(egui::Frame::none().fill(Color32::from_rgb(20, 22, 26)))
-            .show(ctx, |ui| {
-                egui::menu::bar(ui, |ui| {
-                    ui.menu_button("ファイル", |ui| {
-                        if ui.button("新規ノート  Ctrl+N").clicked() {
-                            self.new_note();
-                            ui.close_menu();
-                        }
-                        if ui.button("開く...  Ctrl+O").clicked() {
-                            self.open_file();
-                            ui.close_menu();
-                        }
-                        if ui.button("保存...  Ctrl+S").clicked() {
-                            self.save_current();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("終了").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.menu_button("表示", |ui| {
-                        if ui
-                            .checkbox(&mut self.show_sidebar, "サイドバーを表示")
-                            .clicked()
-                        {
-                            ui.close_menu();
-                        }
-                    });
-                });
-            });
     }
 }
