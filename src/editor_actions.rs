@@ -237,6 +237,180 @@ fn wrap_with_blocks(
     }
 }
 
+/// On Enter at end of a list/quote line, continue the list marker.
+/// Returns the new content and new cursor position if continuation was applied.
+pub fn continue_list_on_enter(content: &str, cursor_char: usize) -> Option<ActionResult> {
+    let b_cursor = char_to_byte(content, cursor_char);
+    let line_start = content[..b_cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line = &content[line_start..b_cursor];
+
+    // Trim leading whitespace to detect indent
+    let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let after_indent = &line[indent.len()..];
+
+    // Detect markers: "- ", "* ", "+ ", "> ", "- [ ] ", "- [x] ", "N. "
+    let (marker, content_after_marker): (String, &str) = if let Some(rest) = after_indent.strip_prefix("- [ ] ") {
+        ("- [ ] ".to_string(), rest)
+    } else if let Some(rest) = after_indent.strip_prefix("- [x] ").or_else(|| after_indent.strip_prefix("- [X] ")) {
+        ("- [ ] ".to_string(), rest)
+    } else if let Some(rest) = after_indent.strip_prefix("- ") {
+        ("- ".to_string(), rest)
+    } else if let Some(rest) = after_indent.strip_prefix("* ") {
+        ("* ".to_string(), rest)
+    } else if let Some(rest) = after_indent.strip_prefix("+ ") {
+        ("+ ".to_string(), rest)
+    } else if let Some(rest) = after_indent.strip_prefix("> ") {
+        ("> ".to_string(), rest)
+    } else {
+        // Check numbered list "N. "
+        let digit_end = after_indent.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
+        if digit_end > 0 {
+            let after_digits = &after_indent[digit_end..];
+            if let Some(rest) = after_digits.strip_prefix(". ") {
+                let n: u32 = after_indent[..digit_end].parse().unwrap_or(0);
+                return Some(continue_numbered(content, b_cursor, &indent, n, rest, cursor_char));
+            }
+        }
+        return None;
+    };
+
+    // If marker content is empty, exit list (delete current marker, insert newline)
+    if content_after_marker.is_empty() {
+        let before = &content[..line_start];
+        let after = &content[b_cursor..];
+        let new_content = format!("{}{}", before, after);
+        let chars_removed = indent.chars().count() + marker.chars().count();
+        return Some(ActionResult {
+            new_content,
+            new_cursor_start: cursor_char - chars_removed,
+            new_cursor_end: cursor_char - chars_removed,
+        });
+    }
+
+    // Insert newline + indent + marker
+    let insertion = format!("\n{}{}", indent, marker);
+    let before = &content[..b_cursor];
+    let after = &content[b_cursor..];
+    let new_content = format!("{}{}{}", before, insertion, after);
+    let new_pos = cursor_char + char_count(&insertion);
+    Some(ActionResult {
+        new_content,
+        new_cursor_start: new_pos,
+        new_cursor_end: new_pos,
+    })
+}
+
+fn continue_numbered(
+    content: &str,
+    b_cursor: usize,
+    indent: &str,
+    current_n: u32,
+    rest_after_marker: &str,
+    cursor_char: usize,
+) -> ActionResult {
+    // Find current line start
+    let line_start = content[..b_cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+
+    if rest_after_marker.is_empty() {
+        // Exit list
+        let before = &content[..line_start];
+        let after = &content[b_cursor..];
+        let new_content = format!("{}{}", before, after);
+        let chars_removed = indent.chars().count() + format!("{}. ", current_n).chars().count();
+        return ActionResult {
+            new_content,
+            new_cursor_start: cursor_char - chars_removed,
+            new_cursor_end: cursor_char - chars_removed,
+        };
+    }
+
+    let next_marker = format!("{}. ", current_n + 1);
+    let insertion = format!("\n{}{}", indent, next_marker);
+    let before = &content[..b_cursor];
+    let after = &content[b_cursor..];
+    let new_content = format!("{}{}{}", before, insertion, after);
+    let new_pos = cursor_char + char_count(&insertion);
+    ActionResult {
+        new_content,
+        new_cursor_start: new_pos,
+        new_cursor_end: new_pos,
+    }
+}
+
+/// Move current line (or selected lines) up or down. Returns updated content and selection.
+pub fn move_lines(content: &str, sel_start: usize, sel_end: usize, up: bool) -> Option<ActionResult> {
+    let (start, end) = if sel_start <= sel_end {
+        (sel_start, sel_end)
+    } else {
+        (sel_end, sel_start)
+    };
+    let b_start = char_to_byte(content, start);
+    let b_end = char_to_byte(content, end);
+
+    let block_start = content[..b_start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let block_end = content[b_end..]
+        .find('\n')
+        .map(|i| b_end + i)
+        .unwrap_or(content.len());
+
+    if up {
+        if block_start == 0 {
+            return None;
+        }
+        let prev_line_start = content[..block_start - 1]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let prev_line = &content[prev_line_start..block_start];
+        let block = &content[block_start..block_end];
+        let suffix = &content[block_end..];
+
+        let mut new_content = String::with_capacity(content.len() + 1);
+        new_content.push_str(&content[..prev_line_start]);
+        new_content.push_str(block);
+        new_content.push('\n');
+        new_content.push_str(prev_line.strip_suffix('\n').unwrap_or(prev_line));
+        new_content.push_str(suffix);
+
+        let shift_chars = char_count(prev_line) as i64;
+        let new_start = (sel_start as i64 - shift_chars).max(0) as usize;
+        let new_end = (sel_end as i64 - shift_chars).max(0) as usize;
+        Some(ActionResult {
+            new_content,
+            new_cursor_start: new_start,
+            new_cursor_end: new_end,
+        })
+    } else {
+        if block_end >= content.len() {
+            return None;
+        }
+        let next_line_end = content[block_end + 1..]
+            .find('\n')
+            .map(|i| block_end + 1 + i)
+            .unwrap_or(content.len());
+        let block = &content[block_start..block_end];
+        let next_line = &content[block_end + 1..next_line_end];
+
+        let mut new_content = String::with_capacity(content.len() + 1);
+        new_content.push_str(&content[..block_start]);
+        new_content.push_str(next_line);
+        new_content.push('\n');
+        new_content.push_str(block);
+        if next_line_end < content.len() {
+            new_content.push_str(&content[next_line_end..]);
+        }
+
+        let shift_chars = char_count(next_line) as i64 + 1;
+        let new_start = sel_start + shift_chars as usize;
+        let new_end = sel_end + shift_chars as usize;
+        Some(ActionResult {
+            new_content,
+            new_cursor_start: new_start,
+            new_cursor_end: new_end,
+        })
+    }
+}
+
 fn insert_table(content: &str, start: usize, end: usize, rows: usize, cols: usize) -> ActionResult {
     let mut table = String::from("\n");
     // Header

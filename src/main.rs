@@ -2,6 +2,8 @@
 
 mod app;
 mod editor_actions;
+mod find_replace;
+mod highlight;
 mod note;
 mod settings;
 mod storage;

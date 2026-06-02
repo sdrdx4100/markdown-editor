@@ -1,4 +1,6 @@
 use crate::editor_actions::{self, EditorAction};
+use crate::find_replace::{self, FindReplaceState};
+use crate::highlight;
 use crate::note::Note;
 use crate::settings::{Settings, ThemeMode};
 use crate::storage;
@@ -17,11 +19,14 @@ pub struct MarkdownApp {
     cache: CommonMarkCache,
     search_query: String,
     pending_action: Option<EditorAction>,
+    pending_line_move: Option<bool>, // true = up, false = down
+    pending_list_continuation: bool,
     settings: Settings,
     last_save_at: Instant,
     notes_dirty: bool,
     show_settings: bool,
     show_trash: bool,
+    find: FindReplaceState,
 }
 
 impl MarkdownApp {
@@ -42,11 +47,14 @@ impl MarkdownApp {
             cache: CommonMarkCache::default(),
             search_query: String::new(),
             pending_action: None,
+            pending_line_move: None,
+            pending_list_continuation: false,
             settings,
             last_save_at: Instant::now(),
             notes_dirty: false,
             show_settings: false,
             show_trash: false,
+            find: FindReplaceState::default(),
         }
     }
 
@@ -69,23 +77,47 @@ impl MarkdownApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let (ctrl, shift, key_s, key_n, key_o, key_b, key_i, key_k, key_e, key_q, key_l, key_t) =
-            ctx.input(|i| {
-                (
-                    i.modifiers.ctrl,
-                    i.modifiers.shift,
-                    i.key_pressed(egui::Key::S),
-                    i.key_pressed(egui::Key::N),
-                    i.key_pressed(egui::Key::O),
-                    i.key_pressed(egui::Key::B),
-                    i.key_pressed(egui::Key::I),
-                    i.key_pressed(egui::Key::K),
-                    i.key_pressed(egui::Key::E),
-                    i.key_pressed(egui::Key::Q),
-                    i.key_pressed(egui::Key::L),
-                    i.key_pressed(egui::Key::T),
-                )
-            });
+        let (
+            ctrl,
+            shift,
+            alt,
+            key_s,
+            key_n,
+            key_o,
+            key_b,
+            key_i,
+            key_k,
+            key_e,
+            key_q,
+            key_l,
+            key_t,
+            key_f,
+            key_h,
+            key_up,
+            key_down,
+            key_esc,
+        ) = ctx.input(|i| {
+            (
+                i.modifiers.ctrl,
+                i.modifiers.shift,
+                i.modifiers.alt,
+                i.key_pressed(egui::Key::S),
+                i.key_pressed(egui::Key::N),
+                i.key_pressed(egui::Key::O),
+                i.key_pressed(egui::Key::B),
+                i.key_pressed(egui::Key::I),
+                i.key_pressed(egui::Key::K),
+                i.key_pressed(egui::Key::E),
+                i.key_pressed(egui::Key::Q),
+                i.key_pressed(egui::Key::L),
+                i.key_pressed(egui::Key::T),
+                i.key_pressed(egui::Key::F),
+                i.key_pressed(egui::Key::H),
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
 
         if ctrl && key_s && !shift {
             self.save_current_to_file();
@@ -116,6 +148,21 @@ impl MarkdownApp {
         }
         if ctrl && shift && key_t {
             self.pending_action = Some(EditorAction::LinePrefix("- [ ] "));
+        }
+        if ctrl && key_f && !shift {
+            self.find.open_find();
+        }
+        if ctrl && key_h && !shift {
+            self.find.open_replace();
+        }
+        if key_esc && self.find.visible {
+            self.find.close();
+        }
+        if alt && key_up {
+            self.pending_line_move = Some(true);
+        }
+        if alt && key_down {
+            self.pending_line_move = Some(false);
         }
     }
 
@@ -570,13 +617,40 @@ impl MarkdownApp {
                     let note = &mut self.notes[self.selected];
                     let prev_content = note.content.clone();
                     let editor_id = egui::Id::new(EDITOR_ID);
+                    let syntax_highlight = self.settings.syntax_highlight;
+                    let theme_mode = self.settings.theme;
+                    let text_color = c.text_normal;
+
+                    let mut layouter = |ui: &Ui, text: &str, wrap_width: f32| {
+                        let mut job = if syntax_highlight {
+                            highlight::layout_markdown(text, font_size, theme_mode, text_color)
+                        } else {
+                            let mut j = egui::text::LayoutJob::default();
+                            j.append(
+                                text,
+                                0.0,
+                                egui::text::TextFormat {
+                                    font_id: FontId::new(font_size, FontFamily::Monospace),
+                                    color: text_color,
+                                    ..Default::default()
+                                },
+                            );
+                            j
+                        };
+                        if word_wrap {
+                            job.wrap.max_width = wrap_width;
+                        }
+                        ui.fonts(|f| f.layout_job(job))
+                    };
+
                     let mut editor = TextEdit::multiline(&mut note.content)
                         .id(editor_id)
                         .desired_rows(40)
                         .frame(false)
                         .font(FontId::new(font_size, FontFamily::Monospace))
                         .text_color(c.text_normal)
-                        .lock_focus(true);
+                        .lock_focus(true)
+                        .layouter(&mut layouter);
                     if word_wrap {
                         editor = editor.desired_width(f32::INFINITY);
                     } else {
@@ -590,6 +664,18 @@ impl MarkdownApp {
                         self.notes_dirty = true;
                     }
 
+                    // Detect Enter for list continuation
+                    let enter_pressed = ui.ctx().input(|i| {
+                        i.key_pressed(egui::Key::Enter)
+                            && !i.modifiers.ctrl
+                            && !i.modifiers.shift
+                            && !i.modifiers.alt
+                    });
+                    if enter_pressed && output.response.has_focus() {
+                        self.pending_list_continuation = true;
+                    }
+
+                    // Apply pending markdown action (toolbar/shortcut)
                     if let Some(action) = self.pending_action.take() {
                         let (sel_start, sel_end) = if let Some(range) = output.cursor_range {
                             (range.primary.ccursor.index, range.secondary.ccursor.index)
@@ -612,6 +698,92 @@ impl MarkdownApp {
                         state.cursor.set_char_range(Some(new_range));
                         state.store(ui.ctx(), editor_id);
                         ui.ctx().memory_mut(|m| m.request_focus(editor_id));
+                    }
+
+                    // Apply line move (Alt+Up/Down)
+                    if let Some(up) = self.pending_line_move.take() {
+                        let (sel_start, sel_end) = if let Some(range) = output.cursor_range {
+                            (range.primary.ccursor.index, range.secondary.ccursor.index)
+                        } else {
+                            (0, 0)
+                        };
+                        if let Some(result) =
+                            editor_actions::move_lines(&note.content, sel_start, sel_end, up)
+                        {
+                            note.content = result.new_content;
+                            note.modified = true;
+                            note.touch();
+                            self.notes_dirty = true;
+
+                            let mut state = output.state.clone();
+                            let new_range = egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(result.new_cursor_start),
+                                egui::text::CCursor::new(result.new_cursor_end),
+                            );
+                            state.cursor.set_char_range(Some(new_range));
+                            state.store(ui.ctx(), editor_id);
+                            ui.ctx().memory_mut(|m| m.request_focus(editor_id));
+                        }
+                    }
+
+                    // Apply list continuation (Enter pressed)
+                    if self.pending_list_continuation {
+                        self.pending_list_continuation = false;
+                        // Cursor is now after the inserted newline; we need to handle
+                        // the case AFTER egui inserted the '\n'. Re-derive cursor.
+                        if let Some(range) = output.cursor_range {
+                            let cursor = range.primary.ccursor.index;
+                            // We want to inspect the line that ended at cursor-1 (the just-broken line).
+                            // After egui inserts \n, the previous line is the marker line.
+                            // We need to look at line BEFORE cursor.
+                            let chars: Vec<char> = note.content.chars().collect();
+                            if cursor > 0 && cursor <= chars.len() && chars[cursor - 1] == '\n' {
+                                // Find prev line start
+                                let mut prev_start = cursor - 1;
+                                while prev_start > 0 && chars[prev_start - 1] != '\n' {
+                                    prev_start -= 1;
+                                }
+                                let prev_line: String = chars[prev_start..cursor - 1].iter().collect();
+                                if let Some(marker) = detect_list_marker(&prev_line) {
+                                    if marker.content_empty {
+                                        // Remove the marker on prev line AND the newline (exit list)
+                                        let new_content: String = chars[..prev_start]
+                                            .iter()
+                                            .chain(chars[cursor..].iter())
+                                            .collect();
+                                        let new_pos = prev_start;
+                                        note.content = new_content;
+                                        let mut state = output.state.clone();
+                                        let new_range = egui::text::CCursorRange::two(
+                                            egui::text::CCursor::new(new_pos),
+                                            egui::text::CCursor::new(new_pos),
+                                        );
+                                        state.cursor.set_char_range(Some(new_range));
+                                        state.store(ui.ctx(), editor_id);
+                                    } else {
+                                        // Insert marker at cursor
+                                        let insertion: String = format!("{}{}", marker.indent, marker.next_marker);
+                                        let new_content: String = chars[..cursor]
+                                            .iter()
+                                            .collect::<String>()
+                                            + &insertion
+                                            + &chars[cursor..].iter().collect::<String>();
+                                        let new_pos = cursor + insertion.chars().count();
+                                        note.content = new_content;
+                                        let mut state = output.state.clone();
+                                        let new_range = egui::text::CCursorRange::two(
+                                            egui::text::CCursor::new(new_pos),
+                                            egui::text::CCursor::new(new_pos),
+                                        );
+                                        state.cursor.set_char_range(Some(new_range));
+                                        state.store(ui.ctx(), editor_id);
+                                    }
+                                    note.modified = true;
+                                    note.touch();
+                                    self.notes_dirty = true;
+                                }
+                            }
+                        }
                     }
                 });
             });
@@ -717,6 +889,12 @@ impl MarkdownApp {
                 {
                     settings_changed = true;
                 }
+                if ui
+                    .checkbox(&mut self.settings.syntax_highlight, "シンタックスハイライト")
+                    .changed()
+                {
+                    settings_changed = true;
+                }
 
                 ui.add_space(8.0);
                 ui.label(RichText::new("ストレージ").strong().size(14.0));
@@ -737,6 +915,166 @@ impl MarkdownApp {
         }
     }
 
+    fn draw_find_bar(&mut self, ctx: &egui::Context) {
+        if !self.find.visible {
+            return;
+        }
+        let c = self.colors();
+        egui::TopBottomPanel::top("find_bar")
+            .frame(
+                egui::Frame::none()
+                    .fill(c.toolbar_bg)
+                    .inner_margin(egui::Margin::symmetric(8.0, 6.0)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🔍").color(c.text_dim));
+                    let query_resp = ui.add(
+                        TextEdit::singleline(&mut self.find.query)
+                            .hint_text("検索...")
+                            .desired_width(200.0),
+                    );
+                    if self.find.focus_query {
+                        query_resp.request_focus();
+                        self.find.focus_query = false;
+                    }
+
+                    // Match count
+                    let matches = find_replace::find_all(
+                        &self.notes[self.selected].content,
+                        &self.find.query,
+                        self.find.case_sensitive,
+                    );
+                    let total = matches.len();
+                    let current_display = if total == 0 {
+                        "0/0".to_string()
+                    } else {
+                        let cur = self.find.current_match.min(total.saturating_sub(1)) + 1;
+                        format!("{}/{}", cur, total)
+                    };
+                    ui.label(RichText::new(current_display).color(c.text_dim).size(11.0));
+
+                    if ui.button("▲").on_hover_text("前へ (Shift+Enter)").clicked() {
+                        if total > 0 {
+                            self.find.current_match = (self.find.current_match + total - 1) % total;
+                            self.jump_to_match(ctx, &matches);
+                        }
+                    }
+                    if ui.button("▼").on_hover_text("次へ (Enter)").clicked() {
+                        if total > 0 {
+                            self.find.current_match = (self.find.current_match + 1) % total;
+                            self.jump_to_match(ctx, &matches);
+                        }
+                    }
+                    ui.checkbox(&mut self.find.case_sensitive, "Aa")
+                        .on_hover_text("大文字小文字を区別");
+
+                    if ui.button("✖").on_hover_text("閉じる (Esc)").clicked() {
+                        self.find.close();
+                    }
+                });
+
+                if self.find.show_replace {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("↳").color(c.text_dim));
+                        ui.add(
+                            TextEdit::singleline(&mut self.find.replace_with)
+                                .hint_text("置換後...")
+                                .desired_width(200.0),
+                        );
+                        if ui.button("置換").clicked() {
+                            self.replace_current_match();
+                        }
+                        if ui.button("すべて置換").clicked() {
+                            self.replace_all();
+                        }
+                    });
+                }
+            });
+
+        // Enter key while focused on the search bar jumps to next match
+        if self.find.visible {
+            let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+            let shift = ctx.input(|i| i.modifiers.shift);
+            if enter {
+                let matches = find_replace::find_all(
+                    &self.notes[self.selected].content,
+                    &self.find.query,
+                    self.find.case_sensitive,
+                );
+                let total = matches.len();
+                if total > 0 {
+                    if shift {
+                        self.find.current_match = (self.find.current_match + total - 1) % total;
+                    } else {
+                        self.find.current_match = (self.find.current_match + 1) % total;
+                    }
+                    self.jump_to_match(ctx, &matches);
+                }
+            }
+        }
+    }
+
+    fn jump_to_match(&self, ctx: &egui::Context, matches: &[(usize, usize)]) {
+        if matches.is_empty() {
+            return;
+        }
+        let (b_start, b_end) = matches[self.find.current_match.min(matches.len() - 1)];
+        let content = &self.notes[self.selected].content;
+        let char_start = content[..b_start].chars().count();
+        let char_end = content[..b_end].chars().count();
+        let editor_id = egui::Id::new(EDITOR_ID);
+        if let Some(mut state) = egui::TextEdit::load_state(ctx, editor_id) {
+            let new_range = egui::text::CCursorRange::two(
+                egui::text::CCursor::new(char_start),
+                egui::text::CCursor::new(char_end),
+            );
+            state.cursor.set_char_range(Some(new_range));
+            state.store(ctx, editor_id);
+        }
+    }
+
+    fn replace_current_match(&mut self) {
+        let matches = find_replace::find_all(
+            &self.notes[self.selected].content,
+            &self.find.query,
+            self.find.case_sensitive,
+        );
+        if matches.is_empty() {
+            return;
+        }
+        let idx = self.find.current_match.min(matches.len() - 1);
+        let (b_start, b_end) = matches[idx];
+        let content = &self.notes[self.selected].content;
+        let new_content = format!(
+            "{}{}{}",
+            &content[..b_start],
+            self.find.replace_with,
+            &content[b_end..]
+        );
+        let note = &mut self.notes[self.selected];
+        note.content = new_content;
+        note.modified = true;
+        note.touch();
+        self.notes_dirty = true;
+    }
+
+    fn replace_all(&mut self) {
+        let (new_content, count) = find_replace::replace_all(
+            &self.notes[self.selected].content,
+            &self.find.query,
+            &self.find.replace_with,
+            self.find.case_sensitive,
+        );
+        if count > 0 {
+            let note = &mut self.notes[self.selected];
+            note.content = new_content;
+            note.modified = true;
+            note.touch();
+            self.notes_dirty = true;
+        }
+    }
+
     fn auto_save_if_needed(&mut self) {
         if self.settings.auto_save
             && self.notes_dirty
@@ -745,6 +1083,67 @@ impl MarkdownApp {
             self.save_notes();
         }
     }
+}
+
+struct ListMarkerInfo {
+    indent: String,
+    next_marker: String,
+    content_empty: bool,
+}
+
+fn detect_list_marker(line: &str) -> Option<ListMarkerInfo> {
+    let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let after = &line[indent.len()..];
+
+    if let Some(rest) = after.strip_prefix("- [ ] ").or_else(|| after.strip_prefix("- [x] ")).or_else(|| after.strip_prefix("- [X] ")) {
+        return Some(ListMarkerInfo {
+            indent,
+            next_marker: "- [ ] ".to_string(),
+            content_empty: rest.trim().is_empty(),
+        });
+    }
+    if let Some(rest) = after.strip_prefix("- ") {
+        return Some(ListMarkerInfo {
+            indent,
+            next_marker: "- ".to_string(),
+            content_empty: rest.trim().is_empty(),
+        });
+    }
+    if let Some(rest) = after.strip_prefix("* ") {
+        return Some(ListMarkerInfo {
+            indent,
+            next_marker: "* ".to_string(),
+            content_empty: rest.trim().is_empty(),
+        });
+    }
+    if let Some(rest) = after.strip_prefix("+ ") {
+        return Some(ListMarkerInfo {
+            indent,
+            next_marker: "+ ".to_string(),
+            content_empty: rest.trim().is_empty(),
+        });
+    }
+    if let Some(rest) = after.strip_prefix("> ") {
+        return Some(ListMarkerInfo {
+            indent,
+            next_marker: "> ".to_string(),
+            content_empty: rest.trim().is_empty(),
+        });
+    }
+    // Numbered: "N. "
+    let digit_end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
+    if digit_end > 0 {
+        let after_digits = &after[digit_end..];
+        if let Some(rest) = after_digits.strip_prefix(". ") {
+            let n: u32 = after[..digit_end].parse().unwrap_or(0);
+            return Some(ListMarkerInfo {
+                indent,
+                next_marker: format!("{}. ", n + 1),
+                content_empty: rest.trim().is_empty(),
+            });
+        }
+    }
+    None
 }
 
 fn default_notes() -> Vec<Note> {
@@ -831,6 +1230,16 @@ impl eframe::App for MarkdownApp {
                         ui.checkbox(&mut self.settings.show_line_numbers, "行番号");
                         ui.checkbox(&mut self.settings.word_wrap, "折り返し");
                     });
+                    ui.menu_button("編集", |ui| {
+                        if ui.button("検索...  Ctrl+F").clicked() {
+                            self.find.open_find();
+                            ui.close_menu();
+                        }
+                        if ui.button("置換...  Ctrl+H").clicked() {
+                            self.find.open_replace();
+                            ui.close_menu();
+                        }
+                    });
                     ui.menu_button("テーマ", |ui| {
                         if ui.radio_value(&mut self.settings.theme, ThemeMode::Dark, "🌙 ダーク").clicked() {
                             theme::apply(ctx, self.settings.theme, self.settings.editor_font_size);
@@ -916,6 +1325,7 @@ impl eframe::App for MarkdownApp {
                 }
             });
 
+        self.draw_find_bar(ctx);
         self.draw_settings_window(ctx);
 
         // Save on close
