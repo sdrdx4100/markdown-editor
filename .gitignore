@@ -1,0 +1,7 @@
+/target
+*.exe
+*.pdb
+
+# User-local Claude/CCD state — not part of the project
+/memory
+.claude/
