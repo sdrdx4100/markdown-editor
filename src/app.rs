@@ -3,7 +3,7 @@ use crate::export;
 use crate::find_replace::{self, FindReplaceState};
 use crate::highlight;
 use crate::note::Note;
-use crate::settings::{Settings, ThemeMode};
+use crate::settings::{Settings, ThemeMode, ViewMode};
 use crate::storage;
 use crate::theme::{self, ThemeColors};
 use crate::toc;
@@ -165,6 +165,16 @@ impl MarkdownApp {
         }
         if alt && key_down {
             self.pending_line_move = Some(false);
+        }
+        // Ctrl+\ to cycle view mode
+        let key_backslash = ctx.input(|i| i.key_pressed(egui::Key::Backslash));
+        if ctrl && key_backslash {
+            self.settings.view_mode = match self.settings.view_mode {
+                ViewMode::EditorOnly => ViewMode::Split,
+                ViewMode::Split => ViewMode::PreviewOnly,
+                ViewMode::PreviewOnly => ViewMode::EditorOnly,
+            };
+            self.save_settings();
         }
     }
 
@@ -588,6 +598,33 @@ impl MarkdownApp {
                         self.notes_dirty = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // View mode toggle buttons (right side)
+                        let mode = self.settings.view_mode;
+                        if ui
+                            .selectable_label(mode == ViewMode::PreviewOnly, "👁")
+                            .on_hover_text("プレビューのみ")
+                            .clicked()
+                        {
+                            self.settings.view_mode = ViewMode::PreviewOnly;
+                            self.save_settings();
+                        }
+                        if ui
+                            .selectable_label(mode == ViewMode::Split, "⫼")
+                            .on_hover_text("分割表示")
+                            .clicked()
+                        {
+                            self.settings.view_mode = ViewMode::Split;
+                            self.save_settings();
+                        }
+                        if ui
+                            .selectable_label(mode == ViewMode::EditorOnly, "📝")
+                            .on_hover_text("編集のみ")
+                            .clicked()
+                        {
+                            self.settings.view_mode = ViewMode::EditorOnly;
+                            self.save_settings();
+                        }
+                        ui.add_space(8.0);
                         ui.label(RichText::new(path_label).color(c.text_dim).size(11.0));
                     });
                 });
@@ -837,11 +874,40 @@ impl MarkdownApp {
                 .fill(c.header_bg)
                 .inner_margin(egui::Margin::symmetric(12.0, 6.0))
                 .show(ui, |ui| {
-                    ui.label(
-                        RichText::new("👁  Preview")
-                            .color(c.text_dim)
-                            .size(12.0),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("👁  Preview")
+                                .color(c.text_dim)
+                                .size(12.0),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let mode = self.settings.view_mode;
+                            if ui
+                                .selectable_label(mode == ViewMode::PreviewOnly, "👁")
+                                .on_hover_text("プレビューのみ")
+                                .clicked()
+                            {
+                                self.settings.view_mode = ViewMode::PreviewOnly;
+                                self.save_settings();
+                            }
+                            if ui
+                                .selectable_label(mode == ViewMode::Split, "⫼")
+                                .on_hover_text("分割表示")
+                                .clicked()
+                            {
+                                self.settings.view_mode = ViewMode::Split;
+                                self.save_settings();
+                            }
+                            if ui
+                                .selectable_label(mode == ViewMode::EditorOnly, "📝")
+                                .on_hover_text("編集のみ")
+                                .clicked()
+                            {
+                                self.settings.view_mode = ViewMode::EditorOnly;
+                                self.save_settings();
+                            }
+                        });
+                    });
                 });
 
             ui.add(egui::Separator::default().spacing(0.0).grow(0.0));
@@ -1345,8 +1411,13 @@ impl eframe::App for MarkdownApp {
                     });
                     ui.menu_button("表示", |ui| {
                         ui.checkbox(&mut self.settings.show_sidebar, "サイドバー");
-                        ui.checkbox(&mut self.settings.show_preview, "プレビュー");
                         ui.checkbox(&mut self.settings.show_toc, "目次 (TOC)");
+                        ui.separator();
+                        ui.label(RichText::new("表示モード").small().color(c.text_dim));
+                        ui.radio_value(&mut self.settings.view_mode, ViewMode::EditorOnly, "📝 編集のみ");
+                        ui.radio_value(&mut self.settings.view_mode, ViewMode::Split, "⫼ 分割表示");
+                        ui.radio_value(&mut self.settings.view_mode, ViewMode::PreviewOnly, "👁 プレビューのみ");
+                        ui.separator();
                         ui.checkbox(&mut self.settings.show_line_numbers, "行番号");
                         ui.checkbox(&mut self.settings.word_wrap, "折り返し");
                         ui.checkbox(&mut self.settings.sync_scroll, "同期スクロール");
@@ -1432,8 +1503,8 @@ impl eframe::App for MarkdownApp {
         // Main area
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
-            .show(ctx, |ui| {
-                if self.settings.show_preview {
+            .show(ctx, |ui| match self.settings.view_mode {
+                ViewMode::Split => {
                     ui.columns(2, |cols| {
                         egui::Frame::none()
                             .fill(c.editor_bg)
@@ -1450,10 +1521,17 @@ impl eframe::App for MarkdownApp {
                                 self.draw_preview(ui);
                             });
                     });
-                } else {
+                }
+                ViewMode::EditorOnly => {
                     egui::Frame::none().fill(c.editor_bg).show(ui, |ui| {
                         ui.set_height(ui.available_height());
                         self.draw_editor(ui);
+                    });
+                }
+                ViewMode::PreviewOnly => {
+                    egui::Frame::none().fill(c.preview_bg).show(ui, |ui| {
+                        ui.set_height(ui.available_height());
+                        self.draw_preview(ui);
                     });
                 }
             });

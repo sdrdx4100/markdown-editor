@@ -12,6 +12,19 @@ impl Default for ThemeMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ViewMode {
+    EditorOnly,
+    Split,
+    PreviewOnly,
+}
+
+impl Default for ViewMode {
+    fn default() -> Self {
+        ViewMode::Split
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -26,8 +39,8 @@ pub struct Settings {
     pub auto_save: bool,
     #[serde(default = "default_true")]
     pub show_sidebar: bool,
-    #[serde(default = "default_true")]
-    pub show_preview: bool,
+    #[serde(default)]
+    pub view_mode: ViewMode,
     #[serde(default = "default_true")]
     pub syntax_highlight: bool,
     #[serde(default)]
@@ -53,7 +66,7 @@ impl Default for Settings {
             word_wrap: true,
             auto_save: true,
             show_sidebar: true,
-            show_preview: true,
+            view_mode: ViewMode::Split,
             syntax_highlight: true,
             show_toc: false,
             sync_scroll: true,
