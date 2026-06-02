@@ -166,11 +166,12 @@ impl MarkdownApp {
                         })
                         .collect();
 
+                    let mut new_selected = self.selected;
+
                     for i in indices {
                         let is_selected = i == self.selected;
-                        let note = &self.notes[i];
-                        let title = note.display_title();
-                        let preview: String = note
+                        let title = self.notes[i].display_title();
+                        let preview: String = self.notes[i]
                             .content
                             .lines()
                             .find(|l| !l.trim_start_matches('#').trim().is_empty())
@@ -181,48 +182,59 @@ impl MarkdownApp {
                             .take(40)
                             .collect();
 
+                        // Allocate the full row first, then sense clicks on that rect
+                        let desired_height = if preview.is_empty() { 36.0 } else { 52.0 };
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), desired_height),
+                            egui::Sense::click(),
+                        );
+
+                        if response.clicked() {
+                            new_selected = i;
+                        }
+
+                        // Paint background (hover effect for unselected)
                         let bg = if is_selected {
                             theme::SELECTED_ITEM_BG
+                        } else if response.hovered() {
+                            Color32::from_rgb(42, 45, 54)
                         } else {
                             theme::SIDEBAR_BG
                         };
+                        ui.painter().rect_filled(rect, 4.0, bg);
 
-                        egui::Frame::none()
-                            .fill(bg)
-                            .rounding(4.0)
-                            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                let resp = ui.vertical(|ui| {
-                                    ui.label(
-                                        RichText::new(&title)
-                                            .color(if is_selected {
-                                                Color32::WHITE
-                                            } else {
-                                                theme::TEXT_NORMAL
-                                            })
-                                            .size(13.0)
-                                            .strong(),
-                                    );
-                                    if !preview.is_empty() {
-                                        ui.label(
-                                            RichText::new(&preview)
-                                                .color(if is_selected {
-                                                    Color32::from_rgb(200, 240, 230)
-                                                } else {
-                                                    theme::TEXT_DIM
-                                                })
-                                                .size(11.0),
-                                        );
-                                    }
-                                });
-                                if resp.response.interact(egui::Sense::click()).clicked() {
-                                    self.selected = i;
-                                }
-                            });
+                        // Paint title text
+                        let title_color = if is_selected { Color32::WHITE } else { theme::TEXT_NORMAL };
+                        let title_pos = rect.min + egui::vec2(12.0, 10.0);
+                        ui.painter().text(
+                            title_pos,
+                            egui::Align2::LEFT_TOP,
+                            &title,
+                            egui::FontId::new(13.0, FontFamily::Proportional),
+                            title_color,
+                        );
 
-                        ui.add_space(1.0);
+                        // Paint preview text
+                        if !preview.is_empty() {
+                            let preview_color = if is_selected {
+                                Color32::from_rgb(200, 240, 230)
+                            } else {
+                                theme::TEXT_DIM
+                            };
+                            let preview_pos = rect.min + egui::vec2(12.0, 28.0);
+                            ui.painter().text(
+                                preview_pos,
+                                egui::Align2::LEFT_TOP,
+                                &preview,
+                                egui::FontId::new(11.0, FontFamily::Proportional),
+                                preview_color,
+                            );
+                        }
+
+                        ui.add_space(2.0);
                     }
+
+                    self.selected = new_selected;
                 });
             });
     }
