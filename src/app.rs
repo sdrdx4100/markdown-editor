@@ -172,7 +172,7 @@ impl MarkdownApp {
         let c = self.colors();
         let resp = ui.add(
             egui::Button::new(RichText::new(label).size(13.0).color(c.text_normal))
-                .min_size(egui::vec2(28.0, 24.0))
+                .min_size(egui::vec2(32.0, 28.0))
                 .fill(c.button_bg),
         );
         if resp.on_hover_text(tooltip).clicked() {
@@ -184,10 +184,11 @@ impl MarkdownApp {
         let c = self.colors();
         egui::Frame::none()
             .fill(c.toolbar_bg)
-            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().item_spacing.y = 4.0;
                     self.toolbar_button(ui, "B", "太字 (Ctrl+B)", EditorAction::Wrap { prefix: "**", suffix: "**" });
                     self.toolbar_button(ui, "I", "斜体 (Ctrl+I)", EditorAction::Wrap { prefix: "*", suffix: "*" });
                     self.toolbar_button(ui, "S", "打ち消し", EditorAction::Wrap { prefix: "~~", suffix: "~~" });
@@ -1306,9 +1307,15 @@ impl eframe::App for MarkdownApp {
 
         // Menu bar
         egui::TopBottomPanel::top("menu_bar")
-            .frame(egui::Frame::none().fill(c.menu_bg))
+            .frame(
+                egui::Frame::none()
+                    .fill(c.menu_bg)
+                    .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
+            )
             .show(ctx, |ui| {
                 egui::menu::bar(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 14.0;
+                    ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
                     ui.menu_button("ファイル", |ui| {
                         if ui.button("新規ノート  Ctrl+N").clicked() {
                             self.new_note();
@@ -1379,7 +1386,7 @@ impl eframe::App for MarkdownApp {
         let dirty = self.notes_dirty;
         let auto_save = self.settings.auto_save;
         egui::TopBottomPanel::bottom("status_bar")
-            .frame(egui::Frame::none().fill(c.menu_bg).inner_margin(egui::Margin::symmetric(8.0, 3.0)))
+            .frame(egui::Frame::none().fill(c.menu_bg).inner_margin(egui::Margin::symmetric(12.0, 6.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let status = if dirty {

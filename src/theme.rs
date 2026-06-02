@@ -73,8 +73,11 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode, font_size: f32) {
     ]
     .into();
 
-    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-    style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    style.spacing.item_spacing = egui::vec2(10.0, 6.0);
+    style.spacing.button_padding = egui::vec2(12.0, 6.0);
+    style.spacing.menu_margin = egui::Margin::symmetric(6.0, 4.0);
+    style.spacing.window_margin = egui::Margin::same(8.0);
+    style.spacing.interact_size.y = 24.0;
 
     let mut visuals = match mode {
         ThemeMode::Dark => Visuals::dark(),
