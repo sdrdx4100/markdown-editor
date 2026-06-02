@@ -14,6 +14,7 @@ pub struct MarkdownApp {
 
 impl MarkdownApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
+        load_japanese_font(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
 
         let notes = vec![
@@ -341,6 +342,41 @@ impl MarkdownApp {
                     });
             });
     }
+}
+
+fn load_japanese_font(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Try Windows system fonts in order of preference
+    let font_candidates = [
+        r"C:\Windows\Fonts\YuGothM.ttc",
+        r"C:\Windows\Fonts\YuGothR.ttc",
+        r"C:\Windows\Fonts\meiryo.ttc",
+        r"C:\Windows\Fonts\msgothic.ttc",
+    ];
+
+    for path in &font_candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "japanese".to_owned(),
+                egui::FontData::from_owned(bytes).into(),
+            );
+            // Add as fallback after the built-in fonts for both Proportional and Monospace
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .push("japanese".to_owned());
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("japanese".to_owned());
+            break;
+        }
+    }
+
+    ctx.set_fonts(fonts);
 }
 
 impl eframe::App for MarkdownApp {
