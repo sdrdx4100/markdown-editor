@@ -437,13 +437,15 @@ impl MarkdownApp {
 
                 ui.add(egui::Separator::default().spacing(0.0).grow(0.0));
 
-                ScrollArea::both()
+                ScrollArea::vertical()
                     .id_salt("preview_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        ui.set_max_width(ui.available_width());
                         egui::Frame::none()
                             .inner_margin(egui::Margin::symmetric(20.0, 16.0))
                             .show(ui, |ui| {
+                                ui.set_max_width(ui.available_width());
                                 CommonMarkViewer::new()
                                     .max_image_width(Some(600))
                                     .show(ui, &mut self.cache, &content);
