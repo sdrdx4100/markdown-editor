@@ -176,30 +176,23 @@ impl MarkdownApp {
         if alt && key_down {
             self.pending_line_move = Some(false);
         }
-        // Ctrl+V: try image paste (text paste is handled by TextEdit natively)
+        // Image paste: TextEdit consumes Ctrl+V before we can see it, so
+        // listen for the paste *event* itself, which still fires after the
+        // widget handles it. When a paste happens, also check whether the
+        // clipboard carries an image — if so, attach it.
+        let paste_event = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Paste(_)))
+        });
+        if paste_event {
+            self.try_paste_image(false);
+        }
+        // Ctrl+Shift+V also works as an explicit trigger (e.g. when the
+        // focus is not on the text editor).
         let key_v = ctx.input(|i| i.key_pressed(egui::Key::V));
-        if ctrl && key_v && !shift {
-            match attachments::paste_clipboard_image() {
-                Ok(Some(path)) => {
-                    let md = attachments::markdown_link_for(&path);
-                    let leaked: &'static str = Box::leak(md.into_boxed_str());
-                    self.pending_action = Some(EditorAction::Insert(leaked));
-                    self.status_override = Some(format!(
-                        "画像を貼り付けました: {}",
-                        path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("image.png")
-                    ));
-                    self.status_override_at = Some(Instant::now());
-                }
-                Ok(None) => {
-                    // No image in clipboard — TextEdit handles text paste natively.
-                }
-                Err(msg) => {
-                    self.status_override = Some(format!("画像の貼り付け失敗: {}", msg));
-                    self.status_override_at = Some(Instant::now());
-                }
-            }
+        if ctrl && shift && key_v {
+            self.try_paste_image(true);
         }
         // Ctrl+P: Quick switcher
         let key_p = ctx.input(|i| i.key_pressed(egui::Key::P));
@@ -1521,6 +1514,35 @@ impl MarkdownApp {
         }
     }
 
+    fn try_paste_image(&mut self, force_message: bool) {
+        let result = attachments::paste_clipboard_image();
+        match result {
+            Ok(Some(path)) => {
+                let md = attachments::markdown_link_for(&path);
+                let leaked: &'static str = Box::leak(md.into_boxed_str());
+                self.pending_action = Some(EditorAction::Insert(leaked));
+                self.status_override = Some(format!(
+                    "画像を貼り付けました: {}",
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("image.png")
+                ));
+                self.status_override_at = Some(Instant::now());
+            }
+            Ok(None) => {
+                if force_message {
+                    self.status_override =
+                        Some("クリップボードに画像はありません".to_string());
+                    self.status_override_at = Some(Instant::now());
+                }
+            }
+            Err(msg) => {
+                self.status_override = Some(format!("画像の貼り付け失敗: {}", msg));
+                self.status_override_at = Some(Instant::now());
+            }
+        }
+    }
+
     fn export_html(&self) {
         let note = &self.notes[self.selected];
         let Some(path) = rfd::FileDialog::new()
@@ -1783,6 +1805,10 @@ impl eframe::App for MarkdownApp {
                             ui.close_menu();
                         }
                         ui.separator();
+                        if ui.button("📋 クリップボードから画像を貼り付け").clicked() {
+                            self.try_paste_image(true);
+                            ui.close_menu();
+                        }
                         if ui.button("Wikiリンクを挿入  [[]]").clicked() {
                             self.pending_action = Some(EditorAction::Insert("[[]]"));
                             ui.close_menu();
