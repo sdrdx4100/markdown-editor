@@ -33,6 +33,8 @@ pub struct MarkdownApp {
     find: FindReplaceState,
     quick_switcher: QuickSwitcherState,
     show_backlinks: bool,
+    status_override: Option<String>,
+    status_override_at: Option<Instant>,
 }
 
 impl MarkdownApp {
@@ -63,6 +65,8 @@ impl MarkdownApp {
             find: FindReplaceState::default(),
             quick_switcher: QuickSwitcherState::default(),
             show_backlinks: true,
+            status_override: None,
+            status_override_at: None,
         }
     }
 
@@ -175,13 +179,26 @@ impl MarkdownApp {
         // Ctrl+V: try image paste (text paste is handled by TextEdit natively)
         let key_v = ctx.input(|i| i.key_pressed(egui::Key::V));
         if ctrl && key_v && !shift {
-            if let Some(path) = attachments::paste_clipboard_image() {
-                let md = attachments::markdown_link_for(&path);
-                // We need to use a static string for EditorAction::Insert. Stash
-                // the rendered link via Box::leak — it's at most one small leak per
-                // paste, acceptable for a session-long-lived editor.
-                let leaked: &'static str = Box::leak(md.into_boxed_str());
-                self.pending_action = Some(EditorAction::Insert(leaked));
+            match attachments::paste_clipboard_image() {
+                Ok(Some(path)) => {
+                    let md = attachments::markdown_link_for(&path);
+                    let leaked: &'static str = Box::leak(md.into_boxed_str());
+                    self.pending_action = Some(EditorAction::Insert(leaked));
+                    self.status_override = Some(format!(
+                        "画像を貼り付けました: {}",
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("image.png")
+                    ));
+                    self.status_override_at = Some(Instant::now());
+                }
+                Ok(None) => {
+                    // No image in clipboard — TextEdit handles text paste natively.
+                }
+                Err(msg) => {
+                    self.status_override = Some(format!("画像の貼り付け失敗: {}", msg));
+                    self.status_override_at = Some(Instant::now());
+                }
             }
         }
         // Ctrl+P: Quick switcher
@@ -1795,11 +1812,21 @@ impl eframe::App for MarkdownApp {
         // Status bar
         let dirty = self.notes_dirty;
         let auto_save = self.settings.auto_save;
+        // Clear status override after 6 seconds
+        if let Some(at) = self.status_override_at {
+            if at.elapsed().as_secs() >= 6 {
+                self.status_override = None;
+                self.status_override_at = None;
+            }
+        }
+        let status_override = self.status_override.clone();
         egui::TopBottomPanel::bottom("status_bar")
             .frame(egui::Frame::none().fill(c.menu_bg).inner_margin(egui::Margin::symmetric(12.0, 6.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let status = if dirty {
+                    let status = if let Some(s) = status_override.as_deref() {
+                        s
+                    } else if dirty {
                         if auto_save { "● 自動保存中…" } else { "● 未保存の変更" }
                     } else {
                         "✓ 保存済み"
