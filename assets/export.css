@@ -1,3 +1,4 @@
+html { scroll-behavior: smooth; }
 body {
   margin: 0;
   padding: 0;
@@ -6,6 +7,11 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
     "Yu Gothic", "Meiryo", sans-serif;
   line-height: 1.6;
+}
+.markdown-body :target {
+  scroll-margin-top: 16px;
+  background: #fff3cd;
+  transition: background 1.5s ease-out;
 }
 .markdown-body {
   max-width: 860px;
