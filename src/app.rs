@@ -35,6 +35,8 @@ pub struct MarkdownApp {
     show_backlinks: bool,
     status_override: Option<String>,
     status_override_at: Option<Instant>,
+    ime_in_progress: bool,    // true while IME preedit is active
+    ime_bs_pending: bool,     // backspace was pressed during this composition
 }
 
 impl MarkdownApp {
@@ -66,6 +68,8 @@ impl MarkdownApp {
             show_backlinks: true,
             status_override: None,
             status_override_at: None,
+            ime_in_progress: false,
+            ime_bs_pending: false,
         }
     }
 
@@ -772,6 +776,12 @@ impl MarkdownApp {
                     }
                     // IME events are consumed (removed) by TextEdit::show(),
                     // so we must read them BEFORE calling show().
+                    //
+                    // We also track Backspace presses across frames: on some
+                    // platforms (e.g. Windows MS-IME with 1 char in preedit)
+                    // pressing Backspace triggers ImeEvent::Commit without
+                    // forwarding Key::Backspace to the app.  We catch that by
+                    // remembering that Backspace was pressed during composition.
                     let (ime_committed, ime_committed_chars) = ui.ctx().input(|i| {
                         let mut committed = false;
                         let mut len = 0usize;
@@ -783,6 +793,40 @@ impl MarkdownApp {
                         }
                         (committed, len)
                     });
+
+                    // Detect preedit activity to know when composition is live.
+                    let ime_preedit_active = ui.ctx().input(|i| {
+                        i.events.iter().any(|e| matches!(
+                            e,
+                            egui::Event::Ime(egui::ImeEvent::Preedit(_))
+                            | egui::Event::Ime(egui::ImeEvent::Enabled)
+                        ))
+                    });
+                    if ime_preedit_active {
+                        self.ime_in_progress = true;
+                    }
+
+                    // Track Backspace presses while composition is live.
+                    let backspace_now = ui.ctx().input(|i| {
+                        i.key_pressed(egui::Key::Backspace)
+                            && !i.modifiers.ctrl
+                            && !i.modifiers.shift
+                            && !i.modifiers.alt
+                    });
+                    if self.ime_in_progress && backspace_now {
+                        self.ime_bs_pending = true;
+                    }
+                    // Any non-Backspace key resets the flag (user continued
+                    // typing or confirmed intentionally).
+                    let non_bs_key = ui.ctx().input(|i| {
+                        i.events.iter().any(|e| {
+                            matches!(e, egui::Event::Key { key, pressed: true, .. }
+                                if *key != egui::Key::Backspace)
+                        })
+                    });
+                    if non_bs_key {
+                        self.ime_bs_pending = false;
+                    }
 
                     let output = editor.show(ui);
 
@@ -835,17 +879,17 @@ impl MarkdownApp {
                     }
 
                     // Backspace during IME composition causes some platforms
-                    // to commit (CompositionEnd) instead of deleting within
-                    // the preedit buffer.  When that happens the committed text
-                    // is in the document but the Backspace did not delete it —
-                    // so we delete the committed chars here.
-                    let backspace_pressed = ui.ctx().input(|i| {
-                        i.key_pressed(egui::Key::Backspace)
-                            && !i.modifiers.ctrl
-                            && !i.modifiers.shift
-                            && !i.modifiers.alt
-                    });
-                    if backspace_pressed && ime_committed && ime_committed_chars > 0
+                    // to commit (ImeEvent::Commit) without forwarding
+                    // Key::Backspace to the app.  This happens especially when
+                    // only 1 char remains in the preedit buffer.
+                    //
+                    // We cover two sub-cases:
+                    //   A) Key::Backspace is in the SAME frame as Commit
+                    //      (backspace_now == true)
+                    //   B) Key::Backspace was in a PREVIOUS frame but Commit
+                    //      arrives later (ime_bs_pending == true)
+                    if ime_committed && ime_committed_chars > 0
+                        && (backspace_now || self.ime_bs_pending)
                         && output.response.has_focus()
                     {
                         if let Some(range) = output.cursor_range {
@@ -870,6 +914,11 @@ impl MarkdownApp {
                                 state.store(ui.ctx(), editor_id);
                             }
                         }
+                    }
+                    // Reset IME tracking after commit.
+                    if ime_committed {
+                        self.ime_in_progress = false;
+                        self.ime_bs_pending = false;
                     }
 
                     // Apply pending markdown action (toolbar/shortcut)
