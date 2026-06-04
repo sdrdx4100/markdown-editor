@@ -177,19 +177,22 @@ impl MarkdownApp {
         }
         // Image paste: TextEdit consumes Ctrl+V before we can see it, so
         // listen for the paste *event* itself, which still fires after the
-        // widget handles it. When a paste happens, also check whether the
-        // clipboard carries an image — if so, attach it.
+        // When a paste happens, also check whether the clipboard carries an
+        // image — if so, attach it.
+        // We listen for BOTH Event::Paste (fires when clipboard has text) AND
+        // raw Ctrl+V (needed for screenshots, which have no text in clipboard
+        // and therefore never generate Event::Paste).
+        let key_v = ctx.input(|i| i.key_pressed(egui::Key::V));
         let paste_event = ctx.input(|i| {
             i.events
                 .iter()
                 .any(|e| matches!(e, egui::Event::Paste(_)))
         });
-        if paste_event {
+        if paste_event || (ctrl && !shift && key_v) {
             self.try_paste_image(false);
         }
         // Ctrl+Shift+V also works as an explicit trigger (e.g. when the
         // focus is not on the text editor).
-        let key_v = ctx.input(|i| i.key_pressed(egui::Key::V));
         if ctrl && shift && key_v {
             self.try_paste_image(true);
         }
