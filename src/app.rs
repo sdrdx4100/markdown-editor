@@ -770,6 +770,20 @@ impl MarkdownApp {
                     } else {
                         editor = editor.desired_width(2000.0);
                     }
+                    // IME events are consumed (removed) by TextEdit::show(),
+                    // so we must read them BEFORE calling show().
+                    let (ime_committed, ime_committed_chars) = ui.ctx().input(|i| {
+                        let mut committed = false;
+                        let mut len = 0usize;
+                        for e in &i.events {
+                            if let egui::Event::Ime(egui::ImeEvent::Commit(text)) = e {
+                                committed = true;
+                                len = text.chars().count();
+                            }
+                        }
+                        (committed, len)
+                    });
+
                     let output = editor.show(ui);
 
                     if note.content != prev_content {
@@ -778,7 +792,9 @@ impl MarkdownApp {
                         self.notes_dirty = true;
                     }
 
-                    // Detect Enter for list continuation
+                    // Detect Enter for list continuation — but skip if Enter
+                    // was consumed by IME to confirm composition (ime_committed
+                    // + Key::Enter appear in the same frame on some platforms).
                     let enter_pressed = ui.ctx().input(|i| {
                         i.key_pressed(egui::Key::Enter)
                             && !i.modifiers.ctrl
@@ -786,7 +802,74 @@ impl MarkdownApp {
                             && !i.modifiers.alt
                     });
                     if enter_pressed && output.response.has_focus() {
-                        self.pending_list_continuation = true;
+                        if ime_committed {
+                            // Enter confirmed the IME composition.
+                            // TextEdit may have inserted a '\n' for the Enter
+                            // event — remove it so the cursor stays on the
+                            // same line.
+                            if let Some(range) = output.cursor_range {
+                                let cursor = range.primary.ccursor.index;
+                                let chars: Vec<char> = note.content.chars().collect();
+                                if cursor > 0 && chars.get(cursor - 1) == Some(&'\n') {
+                                    note.content = chars[..cursor - 1]
+                                        .iter()
+                                        .chain(chars[cursor..].iter())
+                                        .collect();
+                                    note.modified = true;
+                                    note.touch();
+                                    self.notes_dirty = true;
+                                    let new_pos = cursor - 1;
+                                    let mut state = output.state.clone();
+                                    state.cursor.set_char_range(Some(
+                                        egui::text::CCursorRange::two(
+                                            egui::text::CCursor::new(new_pos),
+                                            egui::text::CCursor::new(new_pos),
+                                        ),
+                                    ));
+                                    state.store(ui.ctx(), editor_id);
+                                }
+                            }
+                        } else {
+                            self.pending_list_continuation = true;
+                        }
+                    }
+
+                    // Backspace during IME composition causes some platforms
+                    // to commit (CompositionEnd) instead of deleting within
+                    // the preedit buffer.  When that happens the committed text
+                    // is in the document but the Backspace did not delete it —
+                    // so we delete the committed chars here.
+                    let backspace_pressed = ui.ctx().input(|i| {
+                        i.key_pressed(egui::Key::Backspace)
+                            && !i.modifiers.ctrl
+                            && !i.modifiers.shift
+                            && !i.modifiers.alt
+                    });
+                    if backspace_pressed && ime_committed && ime_committed_chars > 0
+                        && output.response.has_focus()
+                    {
+                        if let Some(range) = output.cursor_range {
+                            let cursor = range.primary.ccursor.index;
+                            let chars: Vec<char> = note.content.chars().collect();
+                            if cursor >= ime_committed_chars {
+                                note.content = chars[..cursor - ime_committed_chars]
+                                    .iter()
+                                    .chain(chars[cursor..].iter())
+                                    .collect();
+                                note.modified = true;
+                                note.touch();
+                                self.notes_dirty = true;
+                                let new_pos = cursor - ime_committed_chars;
+                                let mut state = output.state.clone();
+                                state.cursor.set_char_range(Some(
+                                    egui::text::CCursorRange::two(
+                                        egui::text::CCursor::new(new_pos),
+                                        egui::text::CCursor::new(new_pos),
+                                    ),
+                                ));
+                                state.store(ui.ctx(), editor_id);
+                            }
+                        }
                     }
 
                     // Apply pending markdown action (toolbar/shortcut)
