@@ -4,7 +4,7 @@ use crate::export;
 use crate::find_replace::{self, FindReplaceState};
 use crate::highlight;
 use crate::note::Note;
-use crate::settings::{Settings, ThemeMode, ViewMode};
+use crate::settings::{FontChoice, Settings, ThemeMode, ViewMode};
 use crate::storage;
 use crate::theme::{self, ThemeColors};
 use crate::toc;
@@ -39,9 +39,8 @@ pub struct MarkdownApp {
 
 impl MarkdownApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
-        load_japanese_font(&cc.egui_ctx);
-
         let settings = storage::load_settings();
+        load_japanese_font(&cc.egui_ctx, settings.font_choice);
         theme::apply(&cc.egui_ctx, settings.theme, settings.editor_font_size);
 
         let mut notes = storage::load_notes();
@@ -972,6 +971,7 @@ impl MarkdownApp {
         }
         let mut open = self.show_settings;
         let mut settings_changed = false;
+        let mut font_changed = false;
         egui::Window::new("⚙ 設定")
             .open(&mut open)
             .resizable(false)
@@ -998,6 +998,25 @@ impl MarkdownApp {
 
                 ui.add_space(8.0);
                 ui.label(RichText::new("エディタ").strong().size(14.0));
+
+                ui.horizontal(|ui| {
+                    ui.label("フォント:");
+                    let current = self.settings.font_choice;
+                    egui::ComboBox::from_id_salt("font_choice")
+                        .selected_text(current.display_name())
+                        .show_ui(ui, |ui| {
+                            for &choice in FontChoice::all() {
+                                if ui
+                                    .selectable_label(current == choice, choice.display_name())
+                                    .clicked()
+                                {
+                                    self.settings.font_choice = choice;
+                                    font_changed = true;
+                                    settings_changed = true;
+                                }
+                            }
+                        });
+                });
 
                 ui.horizontal(|ui| {
                     ui.label("フォントサイズ:");
@@ -1051,6 +1070,9 @@ impl MarkdownApp {
                 }
             });
         self.show_settings = open;
+        if font_changed {
+            load_japanese_font(ctx, self.settings.font_choice);
+        }
         if settings_changed {
             theme::apply(ctx, self.settings.theme, self.settings.editor_font_size);
             self.save_settings();
@@ -1701,16 +1723,22 @@ fn default_notes() -> Vec<Note> {
     ]
 }
 
-fn load_japanese_font(ctx: &egui::Context) {
+fn load_japanese_font(ctx: &egui::Context, font_choice: FontChoice) {
     let mut fonts = egui::FontDefinitions::default();
-    let font_candidates = [
+
+    let fallbacks: &[&str] = &[
         r"C:\Windows\Fonts\YuGothM.ttc",
         r"C:\Windows\Fonts\YuGothR.ttc",
         r"C:\Windows\Fonts\meiryo.ttc",
         r"C:\Windows\Fonts\msgothic.ttc",
     ];
 
-    for path in &font_candidates {
+    let selected = font_choice.font_candidates();
+    let candidates = selected
+        .iter()
+        .chain(fallbacks.iter().filter(|f| !selected.contains(f)));
+
+    for &path in candidates {
         if let Ok(bytes) = std::fs::read(path) {
             fonts.font_data.insert(
                 "japanese".to_owned(),
