@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v0.3.0)'
+        required: true
 
 permissions:
   contents: write
@@ -30,16 +35,29 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            "${{ github.event.inputs.version }}"
+          } else {
+            "${{ github.ref_name }}"
+          }
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+
       - name: Stage artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $version = "${{ github.ref_name }}"
+          $version = "${{ steps.ver.outputs.version }}"
           Copy-Item target/release/markdown-editor.exe `
             "dist/markdown-editor-$version-windows-x64.exe"
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: ${{ steps.ver.outputs.version }}
           files: dist/*
           generate_release_notes: true
